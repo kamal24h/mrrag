@@ -1,0 +1,102 @@
+services:
+  # ---------- LLM (Ollama) ----------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: assistant-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=2
+    networks:
+      - assistat_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ---------- Vector DB (Qdrant) ----------
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: assistant-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      #- QDRANT__SERVICE__API_KEY=${992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8}
+      - QDRANT__SERVICE__API_KEY=992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8
+    networks:
+      - assistat_network
+
+  # ---------- Fast API (FastAPI) ----------
+  fastapi:
+    build: .
+    container_name: fastapi_backend
+    restart: always
+    ports:
+      - "127.0.0.1:8000:8000"  # باز روی لوکال‌هاست سرور تا Nginx اوبونتو به آن دسترسی داشته باشد
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      #- QDRANT_API_KEY=${992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8}
+      - QDRANT_API_KEY=992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - qdrant
+      - ollama
+    networks:
+      - assistat_network
+
+  # ---------- Relational DB (PostgreSQL) ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: assistant-postgres
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: assistant_user
+      POSTGRES_PASSWORD: Arian@123
+      POSTGRES_DB: assistant_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant_user -d assistant_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - assistat_network
+
+  # ---------- Cache / Session (Redis) ----------
+  redis:
+    image: redis:7-alpine
+    container_name: assistant-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - assistat_network
+
+volumes:
+  ollama_data:
+  qdrant_data:
+  postgres_data:
+  redis_data:
+
+networks:
+  assistat_network:
+    external: true

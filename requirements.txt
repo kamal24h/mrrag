@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+gunicorn
+langchain-ollama
+langchain-qdrant
+langchain-core
+qdrant-client
+pydantic
