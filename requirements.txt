@@ -4,5 +4,13 @@ gunicorn
 langchain-ollama
 langchain-qdrant
 langchain-core
+langchain-community
 qdrant-client
 pydantic
+python-multipart
+docx2txt
+pypdf
+
+redis
+psycopg2-binary
+sqlalchemy

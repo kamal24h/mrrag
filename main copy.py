@@ -2,9 +2,8 @@
 import os
 import uuid
 import shutil
-import json
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -14,13 +13,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from qdrant_client import QdrantClient
-from typing import Optional, List
 
 # ماژول‌های دیتابیس و ریدیس
-from database import Base, engine, get_db, Document, Conversation, Message
+from database import Base, engine, get_db, Conversation, Message
 from redis_client import get_redis_client, ConversationCache
 # ایمپورت تابع Ingest
-from ingest_service import process_and_index_document, delete_document_vectors
+from ingest_service import run_ingest
 
 # ساخت جداول دیتابیس در صورت عدم وجود
 @asynccontextmanager
@@ -28,8 +26,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     yield
 
-#app = FastAPI(title="Hybrid Assistant RAG API", lifespan=lifespan)
-app = FastAPI(title="Enterprise Assistant RAG API", lifespan=lifespan)
+app = FastAPI(title="Hybrid Assistant RAG API", lifespan=lifespan)
 
 # تنظیمات پایه
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
@@ -90,18 +87,6 @@ async def query_assistant(request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------- Schemas -----------------
-class DocumentOut(BaseModel):
-    id: uuid.UUID
-    docName: str
-    docType: str
-    department: str
-    appId: str
-    metadata: Optional[dict] = None
-    chunksCount: int
-
-    class Config:
-        from_attributes = True
 
 # --- Pydantic Schemas ---
 class BeginConversationRequest(BaseModel):
@@ -226,158 +211,36 @@ async def end_conversation(req: EndConversationRequest, db: Session = Depends(ge
 async def health():
     return {"status": "healthy", "llm_model": LLM_MODEL}
 
-# @app.post("/ingest")
-# async def trigger_ingest():
-#     """ایندکس کردن کلیه فایل‌های موجود در پوشه docs"""
-#     try:
-#         return run_ingest(docs_dir="./docs")
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+@app.post("/ingest")
+async def trigger_ingest():
+    """ایندکس کردن کلیه فایل‌های موجود در پوشه docs"""
+    try:
+        return run_ingest(docs_dir="./docs")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
-# @app.post("/upload-and-ingest")
-# async def upload_and_ingest(file: UploadFile = File(...)):
-#     """آپلود فایل جدید docx یا pdf و اجرای فرآیند ایندکس"""
-#     allowed_extensions = (".docx", ".pdf")
-#     if not file.filename.lower().endswith(allowed_extensions):
-#         raise HTTPException(
-#             status_code=400,
-#             detail=f"فرمت فایل نامعتبر است. تنها فرمت‌های مجاز: {allowed_extensions}"
-#         )
-
-#     upload_dir = "./docs"
-#     os.makedirs(upload_dir, exist_ok=True)
-#     file_path = os.path.join(upload_dir, file.filename)
-
-#     with open(file_path, "wb") as buffer:
-#         shutil.copyfileobj(file.file, buffer)
-
-#     try:
-#         result = run_ingest(docs_dir=upload_dir)
-#         return {
-#             "uploaded_file": file.filename,
-#             "ingest_result": result
-#         }
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
-
-# ----------------- Document Management APIs -----------------
-
-@app.get("/api/v1/documents/index", response_model=List[DocumentOut])
-async def list_documents(
-    appId: Optional[str] = Query(None),
-    department: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-):
-    """لیست اسناد موجود با قابلیت فیلتر بر اساس appId و department"""
-    query = db.query(Document)
-    if appId:
-        query = query.filter(Document.app_id == appId)
-    if department:
-        query = query.filter(Document.department == department)
-
-    docs = query.order_by(Document.created_at.desc()).all()
-    
-    return [
-        DocumentOut(
-            id=d.id,
-            docName=d.doc_name,
-            docType=d.doc_type,
-            department=d.department,
-            appId=d.app_id,
-            metadata=d.meta_info,
-            chunksCount=d.chunks_count
+@app.post("/upload-and-ingest")
+async def upload_and_ingest(file: UploadFile = File(...)):
+    """آپلود فایل جدید docx یا pdf و اجرای فرآیند ایندکس"""
+    allowed_extensions = (".docx", ".pdf")
+    if not file.filename.lower().endswith(allowed_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"فرمت فایل نامعتبر است. تنها فرمت‌های مجاز: {allowed_extensions}"
         )
-        for d in docs
-    ]
 
-@app.post("/api/v1/documents/create")
-async def create_document(
-    file: UploadFile = File(...),
-    docName: str = Form(...),
-    docType: str = Form(...),
-    department: str = Form(...),
-    appId: str = Form(...),
-    metadata: Optional[str] = Form(None), # رشته JSON ورودی
-    db: Session = Depends(get_db)
-):
-    """ایجاد سند در Postgres، وکتورسازی در Qdrant و اتصال متادیتا"""
-    allowed_types = ["pdf", "docx"]
-    if docType.lower() not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"docType مجاز نیست. فقط {allowed_types}")
+    upload_dir = "./docs"
+    os.makedirs(upload_dir, exist_ok=True)
+    file_path = os.path.join(upload_dir, file.filename)
 
-    parsed_metadata = {}
-    if metadata:
-        try:
-            parsed_metadata = json.loads(metadata)
-        except Exception:
-            raise HTTPException(status_code=400, detail="فرمت فیلد metadata باید یک JSON معتبر باشد.")
-
-    # ذخیره فایل در پوشه موقت برای خواندن توسط لودر
-    temp_dir = "./temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_file_path = os.path.join(temp_dir, f"{uuid.uuid4()}_{file.filename}")
-
-    with open(temp_file_path, "wb") as buffer:
+    with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    doc_id = uuid.uuid4()
-
     try:
-        # 1. خردسازی و وکتورسازی در Qdrant
-        chunks_count = process_and_index_document(
-            file_path=temp_file_path,
-            doc_id=str(doc_id),
-            doc_name=docName,
-            doc_type=docType,
-            department=department,
-            app_id=appId,
-            metadata=parsed_metadata
-        )
-
-        # 2. ذخیره متادیتا در PostgreSQL
-        new_doc = Document(
-            id=doc_id,
-            doc_name=docName,
-            doc_type=docType.lower(),
-            department=department,
-            app_id=appId,
-            meta_info=parsed_metadata,
-            chunks_count=chunks_count
-        )
-        db.add(new_doc)
-        db.commit()
-
+        result = run_ingest(docs_dir=upload_dir)
         return {
-            "status": "success",
-            "documentId": str(doc_id),
-            "docName": docName,
-            "chunksCreated": chunks_count
+            "uploaded_file": file.filename,
+            "ingest_result": result
         }
-
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"خطا در پردازش و ذخیره سند: {str(e)}")
-    finally:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-@app.delete("/api/v1/documents/{document_id}")
-async def delete_document(document_id: uuid.UUID, db: Session = Depends(get_db)):
-    """حذف سند از پایگاه داده PostgreSQL و وکتورهای متناظر آن از Qdrant"""
-    doc = db.query(Document).filter(Document.id == document_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="سند مورد نظر یافت نشد.")
-
-    try:
-        # 1. حذف تکه‌ها از Qdrant
-        delete_document_vectors(doc_id=str(document_id))
-
-        # 2. حذف از دیتابیس رابطه‌ای
-        db.delete(doc)
-        db.commit()
-
-        return {"status": "success", "message": f"سند {doc.doc_name} با موفقیت حذف شد."}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"خطا در حذف سند: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")

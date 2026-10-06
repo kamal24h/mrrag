@@ -45,15 +45,25 @@ services:
     container_name: fastapi_backend
     restart: always
     ports:
-      - "127.0.0.1:8000:8000"  # باز روی لوکال‌هاست سرور تا Nginx اوبونتو به آن دسترسی داشته باشد
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./docs:/app/docs  # مپ کردن پوشه اسناد روی سرور به کانتینر
     environment:
       - QDRANT_URL=http://qdrant:6333
-      #- QDRANT_API_KEY=${992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8}
       - QDRANT_API_KEY=992b61d895665cd63484456f34950944dd181ea656ed5e2bf2e4268dae4e96d8
       - OLLAMA_URL=http://ollama:11434
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=assistant_user
+      - POSTGRES_PASSWORD=Arian@123
+      - POSTGRES_DB=assistant_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       - qdrant
       - ollama
+      - postgres
+      - redis
     networks:
       - assistat_network
 
@@ -91,12 +101,14 @@ services:
     networks:
       - assistat_network
 
-volumes:
-  ollama_data:
-  qdrant_data:
-  postgres_data:
-  redis_data:
+  volumes:
+    ollama_data:
+    qdrant_data:
+    postgres_data:
+    redis_data:
 
-networks:
-  assistat_network:
-    external: true
+  networks:
+    assistat_network:
+      external: true
+
+  
